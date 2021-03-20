@@ -2,7 +2,7 @@
 #Table of Contents
 - [Requirements](#requirements)
 - [Create a P2PKH Tx (send to another address)](#P2PKH)
-- [Deploy a Contract or Interact with an existing one](#Contract Creation & Interaction)
+- [Deploy a Contract or Interact with an existing one](#Contracts)
 
 ## Requirements
 - Golang
@@ -30,7 +30,7 @@ Send the rawTx through qtum
 qtum-cli -rpcuser=qtum -rpcpassword=testpasswd sendrawtransaction rawTx
 ```
 
-## Contract Creation & Interaction
+## Contracts
 
 ```
 func ContractTx(privKey string, from string, contractAddr string, amount int64, data []byte, gas int64, gasPrice int64, opcode byte) (string, error
