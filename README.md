@@ -1,8 +1,8 @@
 # Golang functions to create and sign transactions (p2pkh and contract interactions) locally
 #Table of Contents
--[Requirements](#requirements)
--[Create a P2PKH Tx (send to another address)](#P2PKH)
--[Deploy a Contract or Interact with an existing one](#Contract Creation & Interaction)
+- [Requirements](#requirements)
+- [Create a P2PKH Tx (send to another address)](#P2PKH)
+- [Deploy a Contract or Interact with an existing one](#Contract Creation & Interaction)
 
 ## Requirements
 - Golang
