@@ -5,11 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/big"
+	"io"
 	"net/http"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v3"
 	"github.com/decred/dcrd/dcrec/secp256k1/v3/ecdsa"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/qtumproject/qtumsuite"
 	"github.com/qtumproject/qtumsuite/chaincfg"
 	"github.com/qtumproject/qtumsuite/chaincfg/chainhash"
@@ -17,25 +18,6 @@ import (
 	"github.com/qtumproject/qtumsuite/wire"
 	"github.com/shopspring/decimal"
 )
-
-type ContractTransaction struct {
-	From     string   `json:"from"`
-	To       string   `json:"to"`
-	Gas      *big.Int `json:"gas"`      // optional
-	GasPrice *big.Int `json:"gasPrice"` // optional
-	Value    string   `json:"value"`    // optional
-	Data     string   `json:"data"`     // optional
-	Nonce    string   `json:"nonce"`    // optional
-}
-
-type Transaction struct {
-	TxID               string `json:"txid"`
-	SourceAddress      string `json:"source_address"`
-	DestinationAddress string `json:"destination_address"`
-	Amount             int64  `json:"amount"`
-	UnsignedTx         string `json:"unsignedtx"`
-	SignedTx           string `json:"signedtx"`
-}
 
 type JSONRPCRequest struct {
 	ID      string        `json:"id"`
@@ -70,20 +52,47 @@ type ListUnspentResponse []struct {
 	RedeemScript  string          `json:"redeemScript"`
 }
 
-//Take in an ABI in JSON format and return a the corresponding hex_string
-/*func DecodeTx(data []byte) (string, error) {
-	//Load ABI
-	var abi *abi.ABI
-	err := abi.UnmarshalJSON(data)
+var qtumTestNetParams = chaincfg.MainNetParams
+var (
+	OP_CREATE = byte(0xc1)
+	OP_CALL   = byte(0xc2)
+)
+
+func init() {
+
+	//TestnetParams
+	qtumTestNetParams.PubKeyHashAddrID = 120
+	qtumTestNetParams.ScriptHashAddrID = 110
+
+}
+
+//Create something like a map where "name"->inputs or Look at ABI gen
+func CallContractData(reader io.Reader, arguments map[string][]interface{}) ([]byte, error) {
+	parsedABI, err := abi.JSON(reader)
 	if err != nil {
-		return nil, err
+		fmt.Println("Error reading abi JSON: ")
+		return []byte{}, err
 	}
+	//Packing the ABI
+	var bytecode []byte
+	for name, inputs := range arguments {
+		var methodInputs []interface{}
+		//Loop through arguments and create the list of inputs
+		fmt.Println("Method name: ", name)
+		for _, input := range inputs {
+			methodInputs = append(methodInputs, input)
+		}
+		//Pack the inputs into the method
+		fmt.Println("Method Inputs: ", methodInputs)
+		bytecode, err = parsedABI.Pack(name, methodInputs...)
+		if err != nil {
+			fmt.Println("Could not pack input: ", err)
+			return []byte{}, err
+		}
 
-	//extract methods from the ABI
-
-	return tx, nil
-
-}*/
+	}
+	return bytecode, nil
+}
 
 func GatherUTXOs(serilizedPubKey []byte, sourceTx *wire.MsgTx) (*ListUnspentResponse, int64, error) {
 
@@ -144,12 +153,7 @@ func GatherUTXOs(serilizedPubKey []byte, sourceTx *wire.MsgTx) (*ListUnspentResp
 	return listUnspentResp, int64(floatBalance), nil
 }
 
-func CreateTx(privKey string, destination string, amount int64) (string, error) {
-
-	var qtumTestNetParams = chaincfg.MainNetParams
-	//TestnetParams
-	qtumTestNetParams.PubKeyHashAddrID = 120
-	qtumTestNetParams.ScriptHashAddrID = 110
+func P2khTx(privKey string, destination string, amount int64) (string, error) {
 
 	redeemTx := wire.NewMsgTx(wire.TxVersion)
 
@@ -231,7 +235,7 @@ func CreateTx(privKey string, destination string, amount int64) (string, error) 
 	redeemTxOut := wire.NewTxOut(amount, destinationScript)
 	redeemTx.AddTxOut(redeemTxOut)
 
-	//Need to look into the actual fee
+	//Might want to look into a non hard coded way to calculate this
 	var change int64 = amountIn - amount - 100000
 
 	//Get address
@@ -252,12 +256,7 @@ func CreateTx(privKey string, destination string, amount int64) (string, error) 
 	return finalRawTx, nil
 }
 
-func CreateContractTx(privKey string, destination string, amount int64, data string) (string, error) {
-
-	var qtumTestNetParams = chaincfg.MainNetParams
-	//TestnetParams
-	qtumTestNetParams.PubKeyHashAddrID = 120
-	qtumTestNetParams.ScriptHashAddrID = 110
+func ContractTx(privKey string, from string, contractAddr string, amount int64, data []byte, gas int64, gasPrice int64, opcode byte) (string, error) {
 
 	redeemTx := wire.NewMsgTx(wire.TxVersion)
 
@@ -318,10 +317,7 @@ func CreateContractTx(privKey string, destination string, amount int64, data str
 
 	}
 
-	//Get destination address as []byte from function argument (destination)
-
-	//Need to look into the actual fee
-	var change int64 = amountIn - amount - 100000
+	var change int64 = amountIn - amount - gas*gasPrice
 
 	//Get address
 	addrPubKey, err := qtumsuite.NewAddressPubKey(wif.SerializePubKey(), &chaincfg.TestNet3Params)
@@ -332,44 +328,36 @@ func CreateContractTx(privKey string, destination string, amount int64, data str
 		return "", err
 	}
 
-	chanceTxOut := wire.NewTxOut(change, changeScript)
+	changeTxOut := wire.NewTxOut(change, changeScript)
 
-	/*
+	fromAddr, err := qtumsuite.DecodeAddress(from, &qtumTestNetParams)
+	if err != nil {
+		return "", err
+	}
 
-		destinationAddr, err := qtumsuite.DecodeAddress(destination, &qtumTestNetParams)
-		if err != nil {
-			return "", err
-		}
+	//Generate PayToAddressScript
+	senderScript, err := txscript.PayToAddrScript(fromAddr)
+	if err != nil {
+		return "", err
+	}
 
-		//Generate PayToAddressScript
-		destinationScript, err := txscript.PayToAddrScript(destinationAddr)
-		if err != nil {
-			return "", err
-		}
-			ADD OP CODES FOR CONTRACT CREATION TO THE TX OUTPUT
-			// 1    // address type of the pubkeyhash (public key hash)
-			// Address               // sender's pubkeyhash address
-			// {signature, pubkey}   //serialized scriptSig
-			// OP_SENDER
-			// 4                     // EVM version
-			// 100000                //gas limit
-			// 10                    //gas price
-			// 1234                  // data to be sent by the contract
-			// OP_CREATE
+	senderTxOut := wire.NewTxOut(amount, senderScript)
+	redeemTx.AddTxOut(senderTxOut)
 
-			data is
+	contractScript, err := ContractScript(redeemTx, wif, data, contractAddr, opcode)
+	if err != nil {
+		fmt.Println("Something went wrong with the contract script: ", err)
+		return "", err
+	}
 
-			608060405234801561001057600080fd5b5060c78061001f6000396000f3fe6080604052348015600f57600080fd5b506004361060325760003560e01c806360fe47b11460375780636d4ce63c146062575b600080fd5b606060048036036020811015604b57600080fd5b8101908080359060200190929190505050607e565b005b60686088565b6040518082815260200191505060405180910390f35b8060008190555050565b6000805490509056fea264697066735822122083c1f201c2ec2cd8a9fa8c8e2ec8d37fd84917c7fcb9fb4ddf93cf2e55ac297064736f6c63430007040033
-
-	*/
-	contractScript, err := CreateContractScript(data, addrPubKey)
+	//Build vouts
 
 	//Adding the destination address and the amount to the transaction as output
-	redeemTxOut := wire.NewTxOut(amount, contractScript)
+	redeemTxOut := wire.NewTxOut(0, contractScript)
 	redeemTx.AddTxOut(redeemTxOut)
 
 	//Add change to tx out
-	redeemTx.AddTxOut(chanceTxOut)
+	redeemTx.AddTxOut(changeTxOut)
 
 	// Sign the Tx
 	finalRawTx, err := SignTx(redeemTx, pkScripts, wif)
@@ -377,25 +365,33 @@ func CreateContractTx(privKey string, destination string, amount int64, data str
 	return finalRawTx, nil
 }
 
-func CreateContractScript(data string, addrPubKey *qtumsuite.AddressPubKey) ([]byte, error) {
-	/*
-		ADD OP CODES FOR CONTRACT CREATION TO THE TX OUTPUT
-			// 1    // address type of the pubkeyhash (public key hash)
-			// Address               // sender's pubkeyhash address
-			// {signature, pubkey}   //serialized scriptSig
-			// OP_SENDER
-			// 4                     // EVM version
-			// 100000                //gas limit
-			// 10                    //gas price
-			// 1234                  // data to be sent by the contract
-			// OP_CREATE
+//Creates pubKeyScript of to create or call a contract with data depending on the byte used for opcode
+// a 0xc2 byte (OP_CALL) will call a contract with the data, while a 0xc1 byte (OP_CREATE) will create
+// a contract with the data
+func ContractScript(redeemTx *wire.MsgTx, wif *qtumsuite.WIF, data []byte, contractAddr string, opcode byte) ([]byte, error) {
 
-			Might have to worry about the "type"
-	*/
-	scriptBuilder := txscript.NewScriptBuilder().AddData([]byte{1})
-	scriptBuilder.AddData(addrPubKey.AddressPubKeyHash().ScriptAddress())
+	//Build scriptPubKey
+	scriptBuilder := txscript.NewScriptBuilder()
+	scriptBuilder.AddData([]byte{4})  //EVM Version
+	scriptBuilder.AddInt64(2500000)   //gas limit
+	scriptBuilder.AddData([]byte{40}) //Gas price
+	scriptBuilder.AddData(data)       //contract data
+	if opcode == OP_CALL {
+		hexContractAddr, err := hex.DecodeString(contractAddr)
+		if err != nil {
+			fmt.Println("odd length coming from data")
+			return []byte{0}, err
+		}
+		scriptBuilder.AddData(hexContractAddr)
+	}
+	//contract address
+	scriptBuilder.AddOp(opcode) // Add OP_CODE byte (0xc2 -> OP_CALL, 0xc1 -> OP_CREATE)
 
-	return []byte{0}, nil
+	createScript, err := scriptBuilder.Script()
+	if err != nil {
+		return []byte{0}, err
+	}
+	return createScript, nil
 }
 
 func SignTx(redeemTx *wire.MsgTx, sourcePkScript [][]byte, wif *qtumsuite.WIF) (string, error) {
@@ -415,7 +411,7 @@ func SignTx(redeemTx *wire.MsgTx, sourcePkScript [][]byte, wif *qtumsuite.WIF) (
 		privKey := secp256k1.PrivKeyFromBytes(wif.PrivKey.Serialize())
 
 		signature := ecdsa.Sign(privKey, signatureHash)
-
+		//Adding .AddData(wif.SerializePubKey()) causes issues with P2PKH transactions
 		signatureScript, err := txscript.NewScriptBuilder().AddData(append(signature.Serialize(), byte(txscript.SigHashAll))).Script()
 		if err != nil {
 			return "", err
