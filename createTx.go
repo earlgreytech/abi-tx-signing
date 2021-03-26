@@ -411,8 +411,8 @@ func SignTx(redeemTx *wire.MsgTx, sourcePkScript [][]byte, wif *qtumsuite.WIF) (
 		privKey := secp256k1.PrivKeyFromBytes(wif.PrivKey.Serialize())
 
 		signature := ecdsa.Sign(privKey, signatureHash)
-		//Adding .AddData(wif.SerializePubKey()) causes issues with P2PKH transactions
-		signatureScript, err := txscript.NewScriptBuilder().AddData(append(signature.Serialize(), byte(txscript.SigHashAll))).Script()
+		
+		signatureScript, err := txscript.NewScriptBuilder().AddData(append(signature.Serialize(), byte(txscript.SigHashAll))).AddData(wif.SerializePubKey()).Script()
 		if err != nil {
 			return "", err
 		}
